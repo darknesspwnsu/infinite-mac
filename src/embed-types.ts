@@ -93,6 +93,10 @@ export type EmbedNotificationEvent =
           source: "shared" | "fallback";
       }
     | {
+          type: "emulator_error";
+          message: string;
+      }
+    | {
           type: "emulator_state_capabilities";
           supported: boolean;
           reason?: string;

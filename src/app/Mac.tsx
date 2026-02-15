@@ -407,6 +407,12 @@ export default function Mac({
                     error: string,
                     errorRaw: string
                 ) {
+                    if (listenForControlMessages) {
+                        sendEmbedNotification({
+                            type: "emulator_error",
+                            message: error,
+                        });
+                    }
                     if (error.includes("load") && error.includes("/CD-ROM")) {
                         varz.incrementError(
                             "emulator_error:cdrom_chunk_load",
