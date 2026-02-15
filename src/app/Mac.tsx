@@ -717,13 +717,32 @@ export default function Mac({
                     case "emulator_load_disk":
                         getCDROMInfo(event.url)
                             .then(cdrom => emulator.loadCDROM(cdrom))
-                            .catch(err =>
+                            .then(() =>
+                                sendEmbedNotification({
+                                    type: "emulator_disk_mount_succeeded",
+                                    url: event.url,
+                                })
+                            )
+                            .catch(err => {
+                                const message =
+                                    err instanceof Error
+                                        ? err.message
+                                        : String(err);
+                                sendEmbedNotification({
+                                    type: "emulator_disk_mount_failed",
+                                    url: event.url,
+                                    message,
+                                });
+                                sendEmbedNotification({
+                                    type: "emulator_error",
+                                    message: `Could not load CD-ROM: ${message}`,
+                                });
                                 console.error(
                                     "Could not load CD-ROM",
                                     event.url,
                                     err
-                                )
-                            );
+                                );
+                            });
                         break;
                     case "emulator_state_slots_query":
                         void refreshEmbedSaveStateStatus();

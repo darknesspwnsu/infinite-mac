@@ -127,6 +127,15 @@ export type EmbedNotificationEvent =
           mode: "shared" | "fallback";
       }
     | {
+          type: "emulator_disk_mount_succeeded";
+          url: string;
+      }
+    | {
+          type: "emulator_disk_mount_failed";
+          url: string;
+          message: string;
+      }
+    | {
           type: "emulator_error";
           message: string;
       }
