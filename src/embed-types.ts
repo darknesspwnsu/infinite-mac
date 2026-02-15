@@ -47,6 +47,21 @@ export type EmbedControlEvent =
     | {
           type: "emulator_load_disk";
           url: string;
+      }
+    | {
+          type: "emulator_state_slots_query";
+      }
+    | {
+          type: "emulator_state_slot_save";
+          slotIndex: 1 | 2 | 3;
+      }
+    | {
+          type: "emulator_state_slot_load";
+          slotIndex: 1 | 2 | 3;
+      }
+    | {
+          type: "emulator_state_slot_delete";
+          slotIndex: 1 | 2 | 3;
       };
 
 /** Events that are sent from the embedded emulator instance to the parent page */
@@ -69,6 +84,34 @@ export type EmbedNotificationEvent =
     | {
           type: "emulator_audio_activity";
           bytesPerSecond: number;
+      }
+    | {
+          type: "emulator_audio_probe";
+          bytesPerSecond: number;
+          rms: number;
+          clipped: boolean;
+          source: "shared" | "fallback";
+      }
+    | {
+          type: "emulator_state_capabilities";
+          supported: boolean;
+          reason?: string;
+          slotCount: 3;
+      }
+    | {
+          type: "emulator_state_slots";
+          slots: Array<{
+              slotIndex: 1 | 2 | 3;
+              exists: boolean;
+              savedAtIso?: string;
+          }>;
+      }
+    | {
+          type: "emulator_state_action_result";
+          action: "save" | "load" | "delete";
+          slotIndex: 1 | 2 | 3;
+          ok: boolean;
+          message?: string;
       }
     | {
           type: "emulator_screen";

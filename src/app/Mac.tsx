@@ -415,6 +415,20 @@ export default function Mac({
                         });
                     }
                 },
+                emulatorAudioDidProbe(
+                    emulator,
+                    {bytesPerSecond, rms, clipped, source}
+                ) {
+                    if (listenForControlMessages) {
+                        sendEmbedNotification({
+                            type: "emulator_audio_probe",
+                            bytesPerSecond,
+                            rms,
+                            clipped,
+                            source,
+                        });
+                    }
+                },
             }
         );
         emulatorRef.current = emulator;

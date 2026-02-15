@@ -152,6 +152,15 @@ export interface EmulatorDelegate {
         emulator: Emulator,
         bytesPerSecond: number
     ): void;
+    emulatorAudioDidProbe?(
+        emulator: Emulator,
+        probe: {
+            bytesPerSecond: number;
+            rms: number;
+            clipped: boolean;
+            source: "shared" | "fallback";
+        }
+    ): void;
 }
 
 export type EmulatorFallbackCommandSender = (
@@ -265,6 +274,13 @@ export class Emulator {
                     this,
                     bytesPerSecond
                 ),
+            emulatorAudioDidProbe: (probe: {
+                bytesPerSecond: number;
+                rms: number;
+                clipped: boolean;
+                source: "shared" | "fallback";
+            }) =>
+                this.#delegate?.emulatorAudioDidProbe?.(this, probe),
         };
         this.#audio = useSharedMemory
             ? new SharedMemoryEmulatorAudio(this.#input, audioDelegate)

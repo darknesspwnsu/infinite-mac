@@ -17,6 +17,14 @@ export interface EmulatorAudioDelegate {
     emulatorAudioDidRun?(): void;
     emulatorAudioDidBlock?(): void;
     emulatorAudioDidReportActivity?(bytesPerSecond: number): void;
+    emulatorAudioDidProbe?(
+        probe: {
+            bytesPerSecond: number;
+            rms: number;
+            clipped: boolean;
+            source: "shared" | "fallback";
+        }
+    ): void;
 }
 
 export abstract class EmulatorAudio {
@@ -25,8 +33,12 @@ export abstract class EmulatorAudio {
     #delegate?: EmulatorAudioDelegate;
     #debugInterval?: number;
     #activityInterval?: number;
+    #probeInterval?: number;
     #activityBytes = 0;
+    #lastReportedBytesPerSecond = 0;
     #audioRunning = false;
+    #analyser?: AnalyserNode;
+    #analyserFrame?: Float32Array;
     protected emulatorPlaybackNode?: AudioWorkletNode;
 
     constructor(input: EmulatorInput, delegate?: EmulatorAudioDelegate) {
@@ -81,7 +93,12 @@ export abstract class EmulatorAudio {
                 } as EmulatorAudioProcessorOptions,
             }
         );
-        this.emulatorPlaybackNode.connect(this.#audioContext.destination);
+        this.#analyser = this.#audioContext.createAnalyser();
+        this.#analyser.fftSize = 1024;
+        this.#analyser.smoothingTimeConstant = 0.2;
+        this.#analyserFrame = new Float32Array(this.#analyser.fftSize);
+        this.emulatorPlaybackNode.connect(this.#analyser);
+        this.#analyser.connect(this.#audioContext.destination);
 
         // We can't start the audio context until there's a user gesture.
         if (this.#audioContext.state === "suspended") {
@@ -133,11 +150,23 @@ export abstract class EmulatorAudio {
         this.resetAudioBuffer();
         this.#input.handleInput({type: "audio-context-running"});
         this.#delegate?.emulatorAudioDidRun?.();
-        if (this.#delegate?.emulatorAudioDidReportActivity) {
+        if (this.#delegate?.emulatorAudioDidReportActivity || this.#delegate?.emulatorAudioDidProbe) {
             this.#activityInterval = window.setInterval(() => {
                 const bytesPerSecond = this.#activityBytes;
                 this.#activityBytes = 0;
+                this.#lastReportedBytesPerSecond = bytesPerSecond;
                 this.#delegate?.emulatorAudioDidReportActivity?.(bytesPerSecond);
+            }, 1000);
+        }
+        if (this.#delegate?.emulatorAudioDidProbe) {
+            this.#probeInterval = window.setInterval(() => {
+                const metrics = this.#sampleAudioProbe();
+                this.#delegate?.emulatorAudioDidProbe?.({
+                    bytesPerSecond: this.#lastReportedBytesPerSecond,
+                    rms: metrics.rms,
+                    clipped: metrics.clipped,
+                    source: this.probeSource(),
+                });
             }, 1000);
         }
     }
@@ -159,11 +188,36 @@ export abstract class EmulatorAudio {
         if (this.#activityInterval) {
             window.clearInterval(this.#activityInterval);
         }
+        if (this.#probeInterval) {
+            window.clearInterval(this.#probeInterval);
+        }
         if (this.#debugInterval) {
             window.clearInterval(this.#debugInterval);
         }
         this.#audioRunning = false;
         this.#activityBytes = 0;
+        this.#lastReportedBytesPerSecond = 0;
+        this.#analyser = undefined;
+        this.#analyserFrame = undefined;
+    }
+
+    #sampleAudioProbe(): {rms: number; clipped: boolean} {
+        if (!this.#analyser || !this.#analyserFrame) {
+            return {rms: 0, clipped: false};
+        }
+
+        this.#analyser.getFloatTimeDomainData(this.#analyserFrame);
+        let sumSquares = 0;
+        let clipped = false;
+        for (const sample of this.#analyserFrame) {
+            sumSquares += sample * sample;
+            if (!clipped && Math.abs(sample) >= 0.985) {
+                clipped = true;
+            }
+        }
+
+        const rms = Math.sqrt(sumSquares / this.#analyserFrame.length);
+        return {rms: Number.isFinite(rms) ? rms : 0, clipped};
     }
 
     #debugLog(sampleRate: number, sampleSize: number, channels: number) {
@@ -191,6 +245,7 @@ export abstract class EmulatorAudio {
 
     protected abstract resetAudioBuffer(): void;
     protected abstract currentAudioBufferByteLength(): number;
+    protected abstract probeSource(): "shared" | "fallback";
 }
 
 const AUDIO_BUFFER_SIZE = 2 * 22050; // 1 second of 16-bit mono audio at 22050 Hz
@@ -214,6 +269,10 @@ export class SharedMemoryEmulatorAudio extends EmulatorAudio {
     protected currentAudioBufferByteLength(): number {
         return this.#audioRingBuffer.available_read();
     }
+
+    protected probeSource(): "shared" | "fallback" {
+        return "shared";
+    }
 }
 
 export class FallbackEmulatorAudio extends EmulatorAudio {
@@ -232,5 +291,9 @@ export class FallbackEmulatorAudio extends EmulatorAudio {
 
     protected currentAudioBufferByteLength(): number {
         return 0;
+    }
+
+    protected probeSource(): "shared" | "fallback" {
+        return "fallback";
     }
 }
