@@ -58,6 +58,18 @@ export function isValidSrcUrl(srcUrl: string) {
     if (srcProtocol !== "https:") {
         return false;
     }
+
+    // Allow signed launcher proxy URLs from Vercel deployments.
+    // This keeps previews functional while still constraining to the expected
+    // endpoint shape.
+    if (
+        srcHost.endsWith(".vercel.app") &&
+        srcUrlParsed.pathname === "/api/disk-stream" &&
+        srcUrlParsed.searchParams.has("token")
+    ) {
+        return true;
+    }
+
     for (const allowedDomain of allowedDomains) {
         if (
             srcHost === allowedDomain ||
