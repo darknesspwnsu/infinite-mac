@@ -1231,7 +1231,9 @@ export class Emulator {
         // We'll never get keyup events for these keys (if using a shortcut that
         // switches to another tab).
         this.#releaseDownKeys();
-        this.resyncAudioVideo("blur", false);
+        // Focusing the embedded emulator canvas can blur the top-level window.
+        // Do not pause/resync on blur alone; rely on hidden/pagehide/freeze
+        // lifecycle transitions for automatic suspension.
     };
 
     #handleWindowFocus = () => {
