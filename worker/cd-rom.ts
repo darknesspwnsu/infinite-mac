@@ -6,6 +6,8 @@ type CDROMSpec = {
     totalSize?: number;
 };
 
+const CDROM_CHUNK_TIMEOUT_MS = 10_000;
+
 export async function handleRequest(path: string, method: string) {
     const pathPieces = path.split("/");
     const encodedSpec = pathPieces[2];
@@ -190,7 +192,7 @@ async function fetchChunk(
             "Range": `bytes=${chunkStart}-${chunkEnd}`,
         },
         ...cacheOptions,
-        signal: AbortSignal.timeout(2000),
+        signal: AbortSignal.timeout(CDROM_CHUNK_TIMEOUT_MS),
     });
 
     if (!srcRes.ok) {

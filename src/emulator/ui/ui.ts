@@ -133,6 +133,15 @@ export interface EmulatorDelegate {
         error: string,
         errorRaw: string
     ): void;
+    emulatorDidFailChunkFetch?(
+        emulator: Emulator,
+        details: {
+            chunkUrl: string;
+            chunkIndex: number;
+            statusOrError: string;
+            fatal: boolean;
+        }
+    ): void;
     emulatorSettings?(emulator: Emulator): EmulatorSettings;
     emulatorDidMakeCDROMLoadingProgress?(
         emulator: Emulator,
@@ -158,6 +167,19 @@ export interface EmulatorDelegate {
             bytesPerSecond: number;
             rms: number;
             clipped: boolean;
+            source: "shared" | "fallback";
+        }
+    ): void;
+    emulatorAudioDidGateAcknowledge?(emulator: Emulator): void;
+    emulatorAudioDidDebug?(
+        emulator: Emulator,
+        debug: {
+            audioContextRunningFlagSeen: boolean;
+            workerEnqueueCount: number;
+            workerDroppedBeforeGateCount: number;
+            mixerActive: boolean;
+            numSources: number;
+            sampleCountLastInterrupt: number;
             source: "shared" | "fallback";
         }
     ): void;
@@ -976,6 +998,20 @@ export class Emulator {
                 channels,
                 this.#config.flags.debugAudio ?? false
             );
+        } else if (e.data.type === "emulator_audio_gate_ack") {
+            this.#delegate?.emulatorAudioDidGateAcknowledge?.(this);
+        } else if (e.data.type === "emulator_audio_debug") {
+            this.#delegate?.emulatorAudioDidDebug?.(this, {
+                audioContextRunningFlagSeen:
+                    e.data.audioContextRunningFlagSeen,
+                workerEnqueueCount: e.data.workerEnqueueCount,
+                workerDroppedBeforeGateCount:
+                    e.data.workerDroppedBeforeGateCount,
+                mixerActive: e.data.mixerActive,
+                numSources: e.data.numSources,
+                sampleCountLastInterrupt: e.data.sampleCountLastInterrupt,
+                source: e.data.source,
+            });
         } else if (e.data.type === "emulator_blit") {
             if (!this.#gotFirstBlit) {
                 this.#gotFirstBlit = true;
@@ -1036,6 +1072,13 @@ export class Emulator {
                 String(e.data.error),
                 String(e.data.errorRaw ?? e.data.error)
             );
+        } else if (e.data.type === "emulator_chunk_fetch_error") {
+            this.#delegate?.emulatorDidFailChunkFetch?.(this, {
+                chunkUrl: String(e.data.chunkUrl),
+                chunkIndex: Number(e.data.chunkIndex),
+                statusOrError: String(e.data.statusOrError),
+                fatal: Boolean(e.data.fatal),
+            });
         } else if (e.data.type === "emulator_will_load_chunk") {
             this.#delegate?.emulatorDidStartToLoadDiskChunk?.(this);
         } else if (e.data.type === "emulator_did_load_chunk") {

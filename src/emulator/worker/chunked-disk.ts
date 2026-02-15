@@ -23,7 +23,8 @@ export type EmulatorWorkerChunkedDiskDelegate = {
     didFailToLoadChunk: (
         chunkIndex: number,
         chunkUrl: string,
-        error: string
+        error: string,
+        fatal: boolean
     ) => void;
 };
 
@@ -31,6 +32,7 @@ export class EmulatorWorkerChunkedDisk implements EmulatorWorkerDisk {
     #spec: EmulatorChunkedFileSpec;
     #delegate: EmulatorWorkerChunkedDiskDelegate;
     #loadedChunks = new Map<number, Uint8Array>();
+    #fatalChunkError?: Error;
 
     constructor(
         spec: EmulatorChunkedFileSpec,
@@ -49,6 +51,9 @@ export class EmulatorWorkerChunkedDisk implements EmulatorWorkerDisk {
     }
 
     read(buffer: Uint8Array, offset: number, length: number): number {
+        if (this.#fatalChunkError) {
+            throw this.#fatalChunkError;
+        }
         let readSize = 0;
         this.#forEachChunkInRange(
             offset,
@@ -75,6 +80,9 @@ export class EmulatorWorkerChunkedDisk implements EmulatorWorkerDisk {
     }
 
     write(buffer: Uint8Array, offset: number, length: number): number {
+        if (this.#fatalChunkError) {
+            throw this.#fatalChunkError;
+        }
         let writeSize = 0;
         this.#forEachChunkInRange(
             offset,
@@ -150,7 +158,7 @@ export class EmulatorWorkerChunkedDisk implements EmulatorWorkerDisk {
         }
         if (xhr.status !== 200) {
             return {
-                error: `HTTP status ${xhr.status}: (${xhr.statusText}`,
+                error: `HTTP status ${xhr.status}: (${xhr.statusText})`,
                 chunkUrl,
             };
         }
@@ -176,12 +184,17 @@ export class EmulatorWorkerChunkedDisk implements EmulatorWorkerDisk {
         const result = this.doChunkRequest(this.#spec, chunkIndex);
         this.#delegate.didLoadChunk(chunkIndex);
         if ("error" in result) {
+            const fatal = true;
             this.#delegate.didFailToLoadChunk(
                 chunkIndex,
                 result.chunkUrl,
-                result.error
+                result.error,
+                fatal
             );
-            return new Uint8Array(chunkSize);
+            this.#fatalChunkError = new Error(
+                `Could not load disk chunk ${result.chunkUrl}: ${result.error}`
+            );
+            throw this.#fatalChunkError;
         }
         let {chunk} = result;
         // Chunk was on the boundary of a truncated image, pad it out to the

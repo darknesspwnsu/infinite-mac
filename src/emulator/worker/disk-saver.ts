@@ -122,8 +122,13 @@ export class EmulatorWorkerDiskSaver
         this.#delegate.didLoadChunk(chunkIndex);
     }
 
-    didFailToLoadChunk(chunkIndex: number, chunkUrl: string, error: string) {
-        this.#delegate.didFailToLoadChunk(chunkIndex, chunkUrl, error);
+    didFailToLoadChunk(
+        chunkIndex: number,
+        chunkUrl: string,
+        error: string,
+        fatal: boolean
+    ) {
+        this.#delegate.didFailToLoadChunk(chunkIndex, chunkUrl, error, fatal);
     }
 }
 

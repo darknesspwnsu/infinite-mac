@@ -100,6 +100,7 @@ class EmulatorWorkerApi {
     #video: EmulatorWorkerVideo;
     #input: EmulatorWorkerInput;
     #audio: EmulatorWorkerAudio;
+    #audioSource: "shared" | "fallback";
     #files: EmulatorWorkerFiles;
     #ethernet: EmulatorWorkerEthernet;
     #clipboard: EmulatorWorkerClipboard;
@@ -109,6 +110,17 @@ class EmulatorWorkerApi {
     #lastBlitFrameId = 0;
     #nextExpectedBlitTime = 0;
     #lastIdleWaitFrameId = 0;
+    #lastAudioDebugPostAt = 0;
+
+    #audioContextRunningFlagSeen = false;
+    #workerEnqueueCount = 0;
+    #workerDroppedBeforeGateCount = 0;
+    #mixerActive = false;
+    #numSources = 0;
+    #sampleCountLastInterrupt = 0;
+    #audioSampleBytes = 2;
+    #audioChannels = 1;
+    #lastAudioEnqueueAt = 0;
 
     #markedQuiescent = false;
     #handledStop = false;
@@ -164,6 +176,8 @@ class EmulatorWorkerApi {
             audioConfig.type === "shared-memory"
                 ? new SharedMemoryEmulatorWorkerAudio(audioConfig)
                 : new FallbackEmulatorWorkerAudio(audioConfig, audioSender);
+        this.#audioSource =
+            audioConfig.type === "shared-memory" ? "shared" : "fallback";
         this.#files =
             filesConfig.type === "shared-memory"
                 ? new SharedMemoryEmulatorWorkerFiles(filesConfig)
@@ -286,6 +300,8 @@ class EmulatorWorkerApi {
     }
 
     didOpenAudio(sampleRate: number, sampleSize: number, channels: number) {
+        this.#audioSampleBytes = Math.max(1, sampleSize >> 3);
+        this.#audioChannels = Math.max(1, channels);
         postMessage({
             type: "emulator_audio_open",
             sampleRate,
@@ -294,17 +310,50 @@ class EmulatorWorkerApi {
         });
     }
 
+    didAudioMixerStatus(
+        mixerActive: boolean,
+        numSources: number,
+        sampleCountLastInterrupt: number
+    ) {
+        this.#mixerActive = mixerActive;
+        this.#numSources = numSources;
+        this.#sampleCountLastInterrupt = sampleCountLastInterrupt;
+        this.#postAudioDebug();
+    }
+
+    #postAudioDebug(force = false) {
+        const now = performance.now();
+        if (this.#lastAudioEnqueueAt !== 0 && now - this.#lastAudioEnqueueAt > 2000) {
+            this.#mixerActive = false;
+            this.#numSources = 0;
+            this.#sampleCountLastInterrupt = 0;
+        }
+        if (!force && now - this.#lastAudioDebugPostAt < 1000) {
+            return;
+        }
+        this.#lastAudioDebugPostAt = now;
+        postMessage({
+            type: "emulator_audio_debug",
+            audioContextRunningFlagSeen: this.#audioContextRunningFlagSeen,
+            workerEnqueueCount: this.#workerEnqueueCount,
+            workerDroppedBeforeGateCount: this.#workerDroppedBeforeGateCount,
+            mixerActive: this.#mixerActive,
+            numSources: this.#numSources,
+            sampleCountLastInterrupt: this.#sampleCountLastInterrupt,
+            source: this.#audioSource,
+        });
+    }
+
     audioBufferSize(): number {
         return this.#audio.audioBufferSize();
     }
 
     enqueueAudio(bufPtr: number, nbytes: number) {
-        if (
-            !this.getInputValue(
-                InputBufferAddresses.audioContextRunningFlagAddr
-            )
-        ) {
+        this.#checkAudioContextGate();
+        if (!this.#audioContextRunningFlagSeen) {
             // No point in filling up the buffer if we can't play it yet.
+            this.#workerDroppedBeforeGateCount++;
+            this.#postAudioDebug();
             return;
         }
 
@@ -312,7 +361,14 @@ class EmulatorWorkerApi {
             bufPtr,
             bufPtr + nbytes
         );
+        this.#workerEnqueueCount++;
+        this.#lastAudioEnqueueAt = performance.now();
+        this.#mixerActive = nbytes > 0;
+        const bytesPerFrame = Math.max(1, this.#audioSampleBytes * this.#audioChannels);
+        this.#sampleCountLastInterrupt = Math.floor(nbytes / bytesPerFrame);
+        this.#numSources = this.#sampleCountLastInterrupt > 0 ? 1 : 0;
         this.#audio.enqueueAudio(newAudio);
+        this.#postAudioDebug();
     }
 
     idleWait(): boolean {
@@ -415,12 +471,25 @@ class EmulatorWorkerApi {
     #periodicTasks() {
         // TODO: better place to poll for this? On the other hand, only doing it
         // when the machine is idle seems reasonable.
+        this.#checkAudioContextGate();
         this.#handleFileRequests();
         handleExtractionRequests();
 
         if (this.getInputValue(InputBufferAddresses.stopFlagAddr)) {
             this.#handleStop();
         }
+    }
+
+    #checkAudioContextGate() {
+        const audioContextRunningFlagSeen = Boolean(
+            this.getInputValue(InputBufferAddresses.audioContextRunningFlagAddr)
+        );
+        if (!audioContextRunningFlagSeen || this.#audioContextRunningFlagSeen) {
+            return;
+        }
+        this.#audioContextRunningFlagSeen = true;
+        postMessage({type: "emulator_audio_gate_ack"});
+        this.#postAudioDebug(true);
     }
 
     #handleFileRequests() {
@@ -556,10 +625,25 @@ class EmulatorWorkerApi {
         postMessage({type: "emulator_did_load_chunk", chunkIndex});
     }
 
-    didFailToLoadChunk(chunkIndex: number, chunkUrl: string, error: string) {
+    didFailToLoadChunk(
+        chunkIndex: number,
+        chunkUrl: string,
+        error: string,
+        fatal: boolean
+    ) {
+        postMessage({
+            type: "emulator_chunk_fetch_error",
+            chunkUrl,
+            chunkIndex,
+            statusOrError: error,
+            fatal,
+        });
+        if (!fatal) {
+            return;
+        }
         postMessage({
             type: "emulator_did_have_error",
-            error: `Could not load disk chunk ${chunkUrl}: ${error})`,
+            error: `Could not load disk chunk ${chunkUrl}: ${error}`,
         });
     }
 

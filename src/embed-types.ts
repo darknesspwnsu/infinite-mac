@@ -70,6 +70,9 @@ export type EmbedNotificationEvent =
           type: "emulator_loaded";
       }
     | {
+          type: "emulator_audio_gate_ack";
+      }
+    | {
           type: "emulator_audio_open";
           sampleRate: number;
           sampleSize: number;
@@ -91,6 +94,26 @@ export type EmbedNotificationEvent =
           rms: number;
           clipped: boolean;
           source: "shared" | "fallback";
+      }
+    | {
+          type: "emulator_audio_debug";
+          bytesPerSecond: number;
+          rms: number;
+          clipped: boolean;
+          source: "shared" | "fallback";
+          audioContextRunningFlagSeen: boolean;
+          workerEnqueueCount: number;
+          workerDroppedBeforeGateCount: number;
+          mixerActive: boolean;
+          numSources: number;
+          sampleCountLastInterrupt: number;
+      }
+    | {
+          type: "emulator_chunk_fetch_error";
+          chunkUrl: string;
+          chunkIndex: number;
+          statusOrError: string;
+          fatal: boolean;
       }
     | {
           type: "emulator_error";

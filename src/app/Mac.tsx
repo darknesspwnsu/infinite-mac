@@ -238,6 +238,47 @@ export default function Mac({
         const sendEmbedNotification = (event: EmbedNotificationEvent) => {
             window.parent.postMessage(event, "*");
         };
+        const latestAudioProbe: {
+            bytesPerSecond: number;
+            rms: number;
+            clipped: boolean;
+            source: "shared" | "fallback";
+        } = {
+            bytesPerSecond: 0,
+            rms: 0,
+            clipped: false,
+            source: useSharedMemory ? "shared" : "fallback",
+        };
+        const latestWorkerAudioDebug = {
+            audioContextRunningFlagSeen: false,
+            workerEnqueueCount: 0,
+            workerDroppedBeforeGateCount: 0,
+            mixerActive: false,
+            numSources: 0,
+            sampleCountLastInterrupt: 0,
+            source: latestAudioProbe.source,
+        };
+        const sendEmbedAudioDebug = () => {
+            if (!listenForControlMessages) {
+                return;
+            }
+            sendEmbedNotification({
+                type: "emulator_audio_debug",
+                bytesPerSecond: latestAudioProbe.bytesPerSecond,
+                rms: latestAudioProbe.rms,
+                clipped: latestAudioProbe.clipped,
+                source: latestAudioProbe.source,
+                audioContextRunningFlagSeen:
+                    latestWorkerAudioDebug.audioContextRunningFlagSeen,
+                workerEnqueueCount: latestWorkerAudioDebug.workerEnqueueCount,
+                workerDroppedBeforeGateCount:
+                    latestWorkerAudioDebug.workerDroppedBeforeGateCount,
+                mixerActive: latestWorkerAudioDebug.mixerActive,
+                numSources: latestWorkerAudioDebug.numSources,
+                sampleCountLastInterrupt:
+                    latestWorkerAudioDebug.sampleCountLastInterrupt,
+            });
+        };
         const refreshEmbedSaveStateStatus = async () => {
             if (!listenForControlMessages) {
                 return;
@@ -485,6 +526,7 @@ export default function Mac({
                     if (isEmbed) {
                         setEmbedAudioState("running");
                     }
+                    sendEmbedAudioDebug();
                 },
                 emulatorAudioDidBlock() {
                     if (listenForControlMessages) {
@@ -510,6 +552,10 @@ export default function Mac({
                     emulator,
                     {bytesPerSecond, rms, clipped, source}
                 ) {
+                    latestAudioProbe.bytesPerSecond = bytesPerSecond;
+                    latestAudioProbe.rms = rms;
+                    latestAudioProbe.clipped = clipped;
+                    latestAudioProbe.source = source;
                     if (listenForControlMessages) {
                         sendEmbedNotification({
                             type: "emulator_audio_probe",
@@ -517,6 +563,55 @@ export default function Mac({
                             rms,
                             clipped,
                             source,
+                        });
+                    }
+                    sendEmbedAudioDebug();
+                },
+                emulatorAudioDidGateAcknowledge() {
+                    latestWorkerAudioDebug.audioContextRunningFlagSeen = true;
+                    if (listenForControlMessages) {
+                        sendEmbedNotification({
+                            type: "emulator_audio_gate_ack",
+                        });
+                    }
+                    sendEmbedAudioDebug();
+                },
+                emulatorAudioDidDebug(
+                    emulator,
+                    {
+                        audioContextRunningFlagSeen,
+                        workerEnqueueCount,
+                        workerDroppedBeforeGateCount,
+                        mixerActive,
+                        numSources,
+                        sampleCountLastInterrupt,
+                        source,
+                    }
+                ) {
+                    latestWorkerAudioDebug.audioContextRunningFlagSeen =
+                        audioContextRunningFlagSeen;
+                    latestWorkerAudioDebug.workerEnqueueCount =
+                        workerEnqueueCount;
+                    latestWorkerAudioDebug.workerDroppedBeforeGateCount =
+                        workerDroppedBeforeGateCount;
+                    latestWorkerAudioDebug.mixerActive = mixerActive;
+                    latestWorkerAudioDebug.numSources = numSources;
+                    latestWorkerAudioDebug.sampleCountLastInterrupt =
+                        sampleCountLastInterrupt;
+                    latestWorkerAudioDebug.source = source;
+                    sendEmbedAudioDebug();
+                },
+                emulatorDidFailChunkFetch(
+                    emulator,
+                    {chunkUrl, chunkIndex, statusOrError, fatal}
+                ) {
+                    if (listenForControlMessages) {
+                        sendEmbedNotification({
+                            type: "emulator_chunk_fetch_error",
+                            chunkUrl,
+                            chunkIndex,
+                            statusOrError,
+                            fatal,
                         });
                     }
                 },
