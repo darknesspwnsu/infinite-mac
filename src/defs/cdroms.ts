@@ -68,7 +68,8 @@ export async function getCDROMInfo(url: string): Promise<EmulatorCDROM> {
 }
 
 async function fetchCDROMInfo(cdromURL: string): Promise<EmulatorCDROM> {
-    const response = await fetch(`/CD-ROM/${btoa(cdromURL)}`, {
+    const encodedSpec = encodeURIComponent(btoa(cdromURL));
+    const response = await fetch(`/CD-ROM/${encodedSpec}`, {
         method: "PUT",
     });
     if (!response.ok) {

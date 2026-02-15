@@ -8,11 +8,14 @@ type CDROMSpec = {
 
 export async function handleRequest(path: string, method: string) {
     const pathPieces = path.split("/");
+    const encodedSpec = pathPieces[2];
     let specStr;
     try {
-        specStr = atob(pathPieces[2]);
+        // CD-ROM specs are encoded into the URL path segment. Decode URI
+        // escapes first so encoded "/" characters from base64 are preserved.
+        specStr = atob(decodeURIComponent(encodedSpec));
     } catch (e) {
-        return errorResponse("Malformed CD-ROM spec: " + pathPieces[2]);
+        return errorResponse("Malformed CD-ROM spec: " + encodedSpec);
     }
 
     let spec: CDROMSpec;
