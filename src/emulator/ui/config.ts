@@ -455,7 +455,13 @@ export function configToSnowArgs(
         }
     }
     for (const cdrom of config.cdroms) {
-        args.push("--cdrom", cdrom.name);
+        // disk_url entries are represented as "cdroms" in run-def parsing,
+        // but mountReadWrite indicates they should be attached as hard disks.
+        if (cdrom.mountReadWrite) {
+            args.push("--disk", cdrom.name);
+        } else {
+            args.push("--cdrom", cdrom.name);
+        }
     }
     return args;
 }
