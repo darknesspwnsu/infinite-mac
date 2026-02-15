@@ -116,6 +116,17 @@ export type EmbedNotificationEvent =
           fatal: boolean;
       }
     | {
+          type: "emulator_av_resync_applied";
+          reason: "blur" | "hidden" | "freeze" | "manual";
+          droppedAudioMs: number;
+      }
+    | {
+          type: "emulator_audio_queue_stats";
+          bufferedMs: number;
+          droppedChunks: number;
+          mode: "shared" | "fallback";
+      }
+    | {
           type: "emulator_error";
           message: string;
       }

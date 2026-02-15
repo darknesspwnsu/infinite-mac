@@ -14,12 +14,25 @@ export type SaveStateCapabilities = {
 
 type SaveStateManifest = {
     savedAtIso: string;
+    machine: string;
+    stateBytes: number;
+    backend: "snow";
+};
+
+export type SaveStateSlotPayload = {
+    snapshot: Uint8Array;
+    machine: string;
+};
+
+export type LoadStateSlotResult = {
+    slots: SaveStateSlotSummary[];
+    snapshot: Uint8Array;
 };
 
 const SLOT_INDICES: readonly SaveStateSlotIndex[] = [1, 2, 3];
-const SLOT_ROOT_NAME = "factory-state-slots-v1";
-const SLOT_FILES_DIR_NAME = "files";
+const SLOT_ROOT_NAME = "factory-state-slots-v2";
 const SLOT_MANIFEST_FILE_NAME = "manifest.json";
+const SLOT_SNAPSHOT_FILE_NAME = "state.snows";
 
 const emptySlotSummary = (slotIndex: SaveStateSlotIndex): SaveStateSlotSummary => ({
     slotIndex,
@@ -33,9 +46,10 @@ const asStorageWithDirectory = (
     storage: StorageManager
 ): (StorageManager & {
     getDirectory?: () => Promise<FileSystemDirectoryHandle>;
-}) => storage as StorageManager & {
-    getDirectory?: () => Promise<FileSystemDirectoryHandle>;
-};
+}) =>
+    storage as StorageManager & {
+        getDirectory?: () => Promise<FileSystemDirectoryHandle>;
+    };
 
 const getOpfsRoot = async (): Promise<FileSystemDirectoryHandle> => {
     const storage = asStorageWithDirectory(navigator.storage);
@@ -59,6 +73,22 @@ const writeFileText = async (
     const writable = await fileHandle.createWritable();
     await writable.write(contents);
     await writable.close();
+};
+
+const writeFileBytes = async (
+    directory: FileSystemDirectoryHandle,
+    fileName: string,
+    contents: Uint8Array
+): Promise<void> => {
+    const fileHandle = await directory.getFileHandle(fileName, {create: true});
+    const writable = await fileHandle.createWritable();
+    await writable.write(contents);
+    await writable.close();
+};
+
+const readFileBytes = async (handle: FileSystemFileHandle): Promise<Uint8Array> => {
+    const file = await handle.getFile();
+    return new Uint8Array(await file.arrayBuffer());
 };
 
 const tryGetDirectoryHandle = async (
@@ -114,46 +144,10 @@ const clearDirectory = async (directory: FileSystemDirectoryHandle): Promise<voi
     }
 };
 
-const copyFile = async (
-    source: FileSystemFileHandle,
-    targetDirectory: FileSystemDirectoryHandle,
-    name: string
-): Promise<void> => {
-    const sourceFile = await source.getFile();
-    const targetHandle = await targetDirectory.getFileHandle(name, {create: true});
-    const writable = await targetHandle.createWritable();
-    await writable.write(await sourceFile.arrayBuffer());
-    await writable.close();
-};
-
-const copyDirectoryContents = async (
-    sourceDirectory: FileSystemDirectoryHandle,
-    targetDirectory: FileSystemDirectoryHandle
-): Promise<void> => {
-    for await (const [name, handle] of directoryEntries(sourceDirectory)) {
-        if (handle.kind === "directory") {
-            const nestedTarget = await targetDirectory.getDirectoryHandle(name, {
-                create: true,
-            });
-            await clearDirectory(nestedTarget);
-            await copyDirectoryContents(
-                handle as FileSystemDirectoryHandle,
-                nestedTarget
-            );
-            continue;
-        }
-
-        await copyFile(handle as FileSystemFileHandle, targetDirectory, name);
-    }
-};
-
 const readSlotManifest = async (
     slotDirectory: FileSystemDirectoryHandle
 ): Promise<SaveStateManifest | null> => {
-    const manifestHandle = await tryGetFileHandle(
-        slotDirectory,
-        SLOT_MANIFEST_FILE_NAME
-    );
+    const manifestHandle = await tryGetFileHandle(slotDirectory, SLOT_MANIFEST_FILE_NAME);
     if (!manifestHandle) {
         return null;
     }
@@ -162,11 +156,19 @@ const readSlotManifest = async (
         const parsed = JSON.parse(
             await readFileText(manifestHandle)
         ) as Partial<SaveStateManifest>;
-        if (typeof parsed.savedAtIso !== "string") {
+        if (
+            typeof parsed.savedAtIso !== "string" ||
+            typeof parsed.machine !== "string" ||
+            typeof parsed.stateBytes !== "number" ||
+            parsed.backend !== "snow"
+        ) {
             return null;
         }
         return {
             savedAtIso: parsed.savedAtIso,
+            machine: parsed.machine,
+            stateBytes: parsed.stateBytes,
+            backend: "snow",
         };
     } catch {
         return null;
@@ -208,51 +210,6 @@ const getSlotDirectory = async (
         });
     }
     return await tryGetDirectoryHandle(slotsRoot, getSlotDirectoryName(slotIndex));
-};
-
-const copyRuntimeDataToSlot = async (
-    root: FileSystemDirectoryHandle,
-    slotFilesDir: FileSystemDirectoryHandle
-): Promise<void> => {
-    await clearDirectory(slotFilesDir);
-    for await (const [name, handle] of directoryEntries(root)) {
-        if (name === SLOT_ROOT_NAME) {
-            continue;
-        }
-        if (handle.kind === "directory") {
-            const nestedTarget = await slotFilesDir.getDirectoryHandle(name, {
-                create: true,
-            });
-            await clearDirectory(nestedTarget);
-            await copyDirectoryContents(
-                handle as FileSystemDirectoryHandle,
-                nestedTarget
-            );
-            continue;
-        }
-        await copyFile(handle as FileSystemFileHandle, slotFilesDir, name);
-    }
-};
-
-const clearRuntimeData = async (root: FileSystemDirectoryHandle): Promise<void> => {
-    for await (const [name, handle] of directoryEntries(root)) {
-        if (name === SLOT_ROOT_NAME) {
-            continue;
-        }
-        if (handle.kind === "directory") {
-            await removeEntryIfExists(root, name, true);
-        } else {
-            await removeEntryIfExists(root, name, false);
-        }
-    }
-};
-
-const copySlotToRuntimeData = async (
-    slotFilesDir: FileSystemDirectoryHandle,
-    runtimeRoot: FileSystemDirectoryHandle
-): Promise<void> => {
-    await clearRuntimeData(runtimeRoot);
-    await copyDirectoryContents(slotFilesDir, runtimeRoot);
 };
 
 const directoryEntries = (
@@ -306,7 +263,8 @@ export const querySaveStateSlots = async (): Promise<SaveStateSlotSummary[]> => 
         }
 
         const manifest = await readSlotManifest(slotDirectory);
-        if (!manifest) {
+        const snapshotFile = await tryGetFileHandle(slotDirectory, SLOT_SNAPSHOT_FILE_NAME);
+        if (!manifest || !snapshotFile) {
             summaries.push(emptySlotSummary(slotIndex));
             continue;
         }
@@ -322,7 +280,8 @@ export const querySaveStateSlots = async (): Promise<SaveStateSlotSummary[]> => 
 };
 
 export const saveStateSlot = async (
-    slotIndex: SaveStateSlotIndex
+    slotIndex: SaveStateSlotIndex,
+    payload: SaveStateSlotPayload
 ): Promise<SaveStateSlotSummary[]> => {
     const root = await getOpfsRoot();
     const slotsRoot = await getSlotsRoot(root, true);
@@ -335,19 +294,20 @@ export const saveStateSlot = async (
     }
 
     await clearDirectory(slotDirectory);
-    const filesDir = await slotDirectory.getDirectoryHandle(SLOT_FILES_DIR_NAME, {
-        create: true,
-    });
-    await copyRuntimeDataToSlot(root, filesDir);
+    await writeFileBytes(slotDirectory, SLOT_SNAPSHOT_FILE_NAME, payload.snapshot);
     await writeSlotManifest(slotDirectory, {
         savedAtIso: new Date().toISOString(),
+        machine: payload.machine,
+        stateBytes: payload.snapshot.byteLength,
+        backend: "snow",
     });
+
     return await querySaveStateSlots();
 };
 
 export const loadStateSlot = async (
     slotIndex: SaveStateSlotIndex
-): Promise<SaveStateSlotSummary[]> => {
+): Promise<LoadStateSlotResult> => {
     const root = await getOpfsRoot();
     const slotsRoot = await getSlotsRoot(root, false);
     if (!slotsRoot) {
@@ -364,13 +324,20 @@ export const loadStateSlot = async (
         throw new Error(`Slot ${slotIndex} is empty.`);
     }
 
-    const filesDir = await tryGetDirectoryHandle(slotDirectory, SLOT_FILES_DIR_NAME);
-    if (!filesDir) {
+    const snapshotHandle = await tryGetFileHandle(slotDirectory, SLOT_SNAPSHOT_FILE_NAME);
+    if (!snapshotHandle) {
         throw new Error(`Slot ${slotIndex} is empty.`);
     }
 
-    await copySlotToRuntimeData(filesDir, root);
-    return await querySaveStateSlots();
+    const snapshot = await readFileBytes(snapshotHandle);
+    if (!snapshot.byteLength) {
+        throw new Error(`Slot ${slotIndex} snapshot is invalid.`);
+    }
+
+    return {
+        slots: await querySaveStateSlots(),
+        snapshot,
+    };
 };
 
 export const deleteStateSlot = async (

@@ -25,6 +25,13 @@ export interface EmulatorAudioDelegate {
             source: "shared" | "fallback";
         }
     ): void;
+    emulatorAudioDidQueueStats?(
+        stats: {
+            bufferedMs: number;
+            droppedChunks: number;
+            mode: "shared" | "fallback";
+        }
+    ): void;
 }
 
 export abstract class EmulatorAudio {
@@ -37,6 +44,11 @@ export abstract class EmulatorAudio {
     #activityBytes = 0;
     #lastReportedBytesPerSecond = 0;
     #audioRunning = false;
+    #sampleRate = 0;
+    #sampleSize = 0;
+    #channels = 0;
+    #queueBufferedMs = 0;
+    #queueDroppedChunks = 0;
     #analyser?: AnalyserNode;
     #analyserFrame?: Float32Array;
     protected emulatorPlaybackNode?: AudioWorkletNode;
@@ -66,6 +78,9 @@ export abstract class EmulatorAudio {
             `${verb} audio (sampleRate=${sampleRate}, sampleSize=${sampleSize}, channels=${channels})`
         );
         this.#delegate?.emulatorAudioDidOpen?.(sampleRate, sampleSize, channels);
+        this.#sampleRate = sampleRate;
+        this.#sampleSize = sampleSize;
+        this.#channels = channels;
         this.#audioContext = new AudioContext({
             latencyHint: "interactive",
             sampleRate,
@@ -88,11 +103,30 @@ export abstract class EmulatorAudio {
                 channelCount: channels,
                 processorOptions: {
                     sampleSize,
+                    sampleRate,
+                    channels,
                     debug,
                     config: this.workerConfig(),
                 } as EmulatorAudioProcessorOptions,
             }
         );
+        this.emulatorPlaybackNode.port.onmessage = event => {
+            if (event.data?.type !== "queue-stats") {
+                return;
+            }
+            const bufferedMs = Number(event.data.bufferedMs);
+            const droppedChunks = Number(event.data.droppedChunks);
+            if (!Number.isFinite(bufferedMs) || !Number.isFinite(droppedChunks)) {
+                return;
+            }
+            this.#queueBufferedMs = Math.max(0, bufferedMs);
+            this.#queueDroppedChunks = Math.max(0, Math.round(droppedChunks));
+            this.#delegate?.emulatorAudioDidQueueStats?.({
+                bufferedMs: this.#queueBufferedMs,
+                droppedChunks: this.#queueDroppedChunks,
+                mode: this.probeSource(),
+            });
+        };
         this.#analyser = this.#audioContext.createAnalyser();
         this.#analyser.fftSize = 1024;
         this.#analyser.smoothingTimeConstant = 0.2;
@@ -175,6 +209,21 @@ export abstract class EmulatorAudio {
         this.#resumeOnGesture();
     }
 
+    flush(): number {
+        const droppedAudioMs =
+            this.probeSource() === "fallback"
+                ? this.#queueBufferedMs
+                : this.#currentBufferedMs();
+        this.resetAudioBuffer();
+        this.#queueBufferedMs = 0;
+        this.#delegate?.emulatorAudioDidQueueStats?.({
+            bufferedMs: 0,
+            droppedChunks: this.#queueDroppedChunks,
+            mode: this.probeSource(),
+        });
+        return Math.max(0, droppedAudioMs);
+    }
+
     protected reportActivity(byteCount: number) {
         if (byteCount <= 0) {
             return;
@@ -197,8 +246,29 @@ export abstract class EmulatorAudio {
         this.#audioRunning = false;
         this.#activityBytes = 0;
         this.#lastReportedBytesPerSecond = 0;
+        this.#queueBufferedMs = 0;
+        this.#queueDroppedChunks = 0;
+        this.#sampleRate = 0;
+        this.#sampleSize = 0;
+        this.#channels = 0;
         this.#analyser = undefined;
         this.#analyserFrame = undefined;
+    }
+
+    #currentBufferedMs(): number {
+        if (!this.#sampleRate || !this.#sampleSize || !this.#channels) {
+            return 0;
+        }
+        const bufferedBytes = this.currentAudioBufferByteLength();
+        if (bufferedBytes <= 0) {
+            return 0;
+        }
+        const bytesPerSecond =
+            this.#sampleRate * Math.max(1, this.#sampleSize >> 3) * this.#channels;
+        if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
+            return 0;
+        }
+        return (bufferedBytes / bytesPerSecond) * 1000;
     }
 
     #sampleAudioProbe(): {rms: number; clipped: boolean} {

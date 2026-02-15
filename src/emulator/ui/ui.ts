@@ -183,6 +183,21 @@ export interface EmulatorDelegate {
             source: "shared" | "fallback";
         }
     ): void;
+    emulatorAudioDidQueueStats?(
+        emulator: Emulator,
+        stats: {
+            bufferedMs: number;
+            droppedChunks: number;
+            mode: "shared" | "fallback";
+        }
+    ): void;
+    emulatorDidApplyAVResync?(
+        emulator: Emulator,
+        details: {
+            reason: "blur" | "hidden" | "freeze" | "manual";
+            droppedAudioMs: number;
+        }
+    ): void;
 }
 
 export type EmulatorFallbackCommandSender = (
@@ -223,6 +238,16 @@ export class Emulator {
     #mouseX = 0;
     #mouseY = 0;
     #trackpadController: EmulatorTrackpadController;
+    #vmSnapshotRequestId = 1;
+    #vmSnapshotPending = new Map<
+        number,
+        {
+            action: "save" | "load";
+            resolve: (value?: Uint8Array) => void;
+            reject: (reason?: unknown) => void;
+            timeout: number;
+        }
+    >();
 
     constructor(config: EmulatorConfig, delegate?: EmulatorDelegate) {
         console.time("Emulator first blit");
@@ -303,6 +328,11 @@ export class Emulator {
                 source: "shared" | "fallback";
             }) =>
                 this.#delegate?.emulatorAudioDidProbe?.(this, probe),
+            emulatorAudioDidQueueStats: (stats: {
+                bufferedMs: number;
+                droppedChunks: number;
+                mode: "shared" | "fallback";
+            }) => this.#delegate?.emulatorAudioDidQueueStats?.(this, stats),
         };
         this.#audio = useSharedMemory
             ? new SharedMemoryEmulatorAudio(this.#input, audioDelegate)
@@ -380,6 +410,11 @@ export class Emulator {
             this.#handleVisibilityChange
         );
         window.addEventListener("blur", this.#handleWindowBlur);
+        window.addEventListener("focus", this.#handleWindowFocus);
+        window.addEventListener("pagehide", this.#handlePageHide);
+        window.addEventListener("pageshow", this.#handlePageShow);
+        document.addEventListener("freeze" as any, this.#handleFreeze as any);
+        document.addEventListener("resume" as any, this.#handleResume as any);
 
         await this.#startWorker();
     }
@@ -629,6 +664,11 @@ export class Emulator {
             this.#handleVisibilityChange
         );
         window.removeEventListener("blur", this.#handleWindowBlur);
+        window.removeEventListener("focus", this.#handleWindowFocus);
+        window.removeEventListener("pagehide", this.#handlePageHide);
+        window.removeEventListener("pageshow", this.#handlePageShow);
+        document.removeEventListener("freeze" as any, this.#handleFreeze as any);
+        document.removeEventListener("resume" as any, this.#handleResume as any);
 
         this.#input.handleInput({type: "stop"});
         this.#ethernetPinger.stop();
@@ -677,6 +717,67 @@ export class Emulator {
 
     requestAudioResume() {
         this.#audio.requestResume();
+    }
+
+    saveVMSnapshot(): Promise<Uint8Array> {
+        const requestId = this.#vmSnapshotRequestId++;
+        return new Promise((resolve, reject) => {
+            const timeout = window.setTimeout(() => {
+                this.#vmSnapshotPending.delete(requestId);
+                reject(new Error("Timed out waiting for VM snapshot save response."));
+            }, 60_000);
+            this.#vmSnapshotPending.set(requestId, {
+                action: "save",
+                resolve: value => resolve(value as Uint8Array),
+                reject,
+                timeout,
+            });
+            this.#worker.postMessage({
+                type: "vm_snapshot_save",
+                requestId,
+            });
+        });
+    }
+
+    loadVMSnapshot(snapshot: Uint8Array): Promise<void> {
+        const requestId = this.#vmSnapshotRequestId++;
+        return new Promise((resolve, reject) => {
+            const timeout = window.setTimeout(() => {
+                this.#vmSnapshotPending.delete(requestId);
+                reject(new Error("Timed out waiting for VM snapshot load response."));
+            }, 60_000);
+            this.#vmSnapshotPending.set(requestId, {
+                action: "load",
+                resolve: () => resolve(),
+                reject,
+                timeout,
+            });
+            this.#worker.postMessage(
+                {
+                    type: "vm_snapshot_load",
+                    requestId,
+                    data: snapshot,
+                },
+                [snapshot.buffer]
+            );
+        });
+    }
+
+    resyncAudioVideo(
+        reason: "blur" | "hidden" | "freeze" | "manual",
+        resumeNow: boolean
+    ) {
+        const droppedAudioMs = this.#audio.flush();
+        this.#delegate?.emulatorDidApplyAVResync?.(this, {
+            reason,
+            droppedAudioMs,
+        });
+        this.pause();
+        if (!resumeNow) {
+            return;
+        }
+        this.unpause();
+        this.requestAudioResume();
     }
 
     handleExternalInput(
@@ -974,6 +1075,7 @@ export class Emulator {
             // need to synthesize one to avoid the guest ending up with it
             // stuck on.
             this.#releaseDownKeys();
+            this.resyncAudioVideo("freeze", false);
         }
     };
 
@@ -1083,20 +1185,45 @@ export class Emulator {
             this.#delegate?.emulatorDidStartToLoadDiskChunk?.(this);
         } else if (e.data.type === "emulator_did_load_chunk") {
             this.#delegate?.emulatorDidFinishLoadingDiskChunk?.(this);
+        } else if (e.data.type === "emulator_vm_snapshot_saved") {
+            const pending = this.#vmSnapshotPending.get(e.data.requestId);
+            if (!pending || pending.action !== "save") {
+                return;
+            }
+            this.#vmSnapshotPending.delete(e.data.requestId);
+            window.clearTimeout(pending.timeout);
+            const payload =
+                e.data.data instanceof Uint8Array
+                    ? e.data.data
+                    : new Uint8Array(e.data.data);
+            pending.resolve(payload);
+        } else if (e.data.type === "emulator_vm_snapshot_loaded") {
+            const pending = this.#vmSnapshotPending.get(e.data.requestId);
+            if (!pending || pending.action !== "load") {
+                return;
+            }
+            this.#vmSnapshotPending.delete(e.data.requestId);
+            window.clearTimeout(pending.timeout);
+            pending.resolve();
+        } else if (e.data.type === "emulator_vm_snapshot_error") {
+            const pending = this.#vmSnapshotPending.get(e.data.requestId);
+            if (!pending) {
+                return;
+            }
+            this.#vmSnapshotPending.delete(e.data.requestId);
+            window.clearTimeout(pending.timeout);
+            pending.reject(new Error(String(e.data.error || "VM snapshot operation failed.")));
         } else {
             console.warn("Unexpected postMessage event", e);
         }
     };
 
     #handleVisibilityChange = () => {
-        if (this.#config.flags.autoPause) {
-            if (document.hidden) {
-                this.pause();
-                return;
-            } else {
-                this.unpause();
-            }
+        if (document.hidden) {
+            this.resyncAudioVideo("hidden", false);
+            return;
         }
+        this.resyncAudioVideo("manual", true);
         this.#drawScreen();
     };
 
@@ -1104,6 +1231,27 @@ export class Emulator {
         // We'll never get keyup events for these keys (if using a shortcut that
         // switches to another tab).
         this.#releaseDownKeys();
+        this.resyncAudioVideo("blur", false);
+    };
+
+    #handleWindowFocus = () => {
+        this.resyncAudioVideo("manual", true);
+    };
+
+    #handlePageHide = () => {
+        this.resyncAudioVideo("freeze", false);
+    };
+
+    #handlePageShow = () => {
+        this.resyncAudioVideo("manual", true);
+    };
+
+    #handleFreeze = () => {
+        this.resyncAudioVideo("freeze", false);
+    };
+
+    #handleResume = () => {
+        this.resyncAudioVideo("manual", true);
     };
 
     #releaseDownKeys() {

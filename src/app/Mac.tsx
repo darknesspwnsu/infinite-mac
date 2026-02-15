@@ -314,18 +314,19 @@ export default function Mac({
             action: "save" | "load" | "delete",
             slotIndex: 1 | 2 | 3
         ) => {
+            emulator.pause();
             try {
                 if (action === "save") {
-                    emulator.pause();
-                    await saveStateSlot(slotIndex);
-                    emulator.unpause();
+                    const snapshot = await emulator.saveVMSnapshot();
+                    await saveStateSlot(slotIndex, {
+                        snapshot,
+                        machine: machine.name,
+                    });
                 } else if (action === "load") {
-                    emulator.pause();
-                    await loadStateSlot(slotIndex);
+                    const {snapshot} = await loadStateSlot(slotIndex);
+                    await emulator.loadVMSnapshot(snapshot);
                 } else {
-                    emulator.pause();
                     await deleteStateSlot(slotIndex);
-                    emulator.unpause();
                 }
 
                 sendEmbedNotification({
@@ -335,12 +336,6 @@ export default function Mac({
                     ok: true,
                 });
                 await refreshEmbedSaveStateStatus();
-
-                if (action === "load") {
-                    // Loading a checkpoint rewrites OPFS disk state, so reboot
-                    // to remount state from a clean emulator process.
-                    window.setTimeout(() => window.location.reload(), 120);
-                }
             } catch (err) {
                 sendEmbedNotification({
                     type: "emulator_state_action_result",
@@ -353,6 +348,7 @@ export default function Mac({
                             : "Save-state action failed.",
                 });
                 await refreshEmbedSaveStateStatus();
+            } finally {
                 emulator.unpause();
             }
         };
@@ -600,6 +596,31 @@ export default function Mac({
                         sampleCountLastInterrupt;
                     latestWorkerAudioDebug.source = source;
                     sendEmbedAudioDebug();
+                },
+                emulatorAudioDidQueueStats(
+                    emulator,
+                    {bufferedMs, droppedChunks, mode}
+                ) {
+                    if (listenForControlMessages) {
+                        sendEmbedNotification({
+                            type: "emulator_audio_queue_stats",
+                            bufferedMs,
+                            droppedChunks,
+                            mode,
+                        });
+                    }
+                },
+                emulatorDidApplyAVResync(
+                    emulator,
+                    {reason, droppedAudioMs}
+                ) {
+                    if (listenForControlMessages) {
+                        sendEmbedNotification({
+                            type: "emulator_av_resync_applied",
+                            reason,
+                            droppedAudioMs,
+                        });
+                    }
                 },
                 emulatorDidFailChunkFetch(
                     emulator,

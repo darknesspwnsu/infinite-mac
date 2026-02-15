@@ -75,11 +75,47 @@ import {EmulatorWorkerDeviceImageDisk} from "@/emulator/worker/device-image-disk
 import {EmulatorWorkerSpeedGovernor} from "@/emulator/worker/speed-governor";
 import {emulatorNeedsDeviceImage} from "@/emulator/common/device-image";
 
+type SnapshotHookGlobal = typeof globalThis & {
+    __snowRequestVMSnapshotSave?: (requestId: number) => void;
+    __snowRequestVMSnapshotLoad?: (requestId: number, data: Uint8Array) => void;
+};
+
+let activeWorkerApi: EmulatorWorkerApi | undefined;
+
 addEventListener("message", async event => {
     const {data} = event;
     const {type} = data;
     if (type === "start") {
+        activeWorkerApi = undefined;
         await startEmulator(data.config);
+        return;
+    }
+    if (type === "vm_snapshot_save") {
+        if (!activeWorkerApi) {
+            postMessage({
+                type: "emulator_vm_snapshot_error",
+                requestId: Number(data.requestId),
+                error: "Emulator worker is not ready for VM snapshots yet.",
+            });
+            return;
+        }
+        activeWorkerApi.requestVMSnapshotSave(Number(data.requestId));
+        return;
+    }
+    if (type === "vm_snapshot_load") {
+        if (!activeWorkerApi) {
+            postMessage({
+                type: "emulator_vm_snapshot_error",
+                requestId: Number(data.requestId),
+                error: "Emulator worker is not ready for VM snapshots yet.",
+            });
+            return;
+        }
+        const payload =
+            data.data instanceof Uint8Array
+                ? data.data
+                : new Uint8Array(data.data as ArrayBuffer);
+        activeWorkerApi.requestVMSnapshotLoad(Number(data.requestId), payload);
     }
 });
 
@@ -121,6 +157,7 @@ class EmulatorWorkerApi {
     #audioSampleBytes = 2;
     #audioChannels = 1;
     #lastAudioEnqueueAt = 0;
+    #supportsVMSnapshots = false;
 
     #markedQuiescent = false;
     #handledStop = false;
@@ -147,6 +184,7 @@ class EmulatorWorkerApi {
             diskFiles,
             cdroms,
             speedGovernorTargetIPS,
+            emulatorType,
         } = config;
         const blitSender = (
             data: EmulatorWorkerVideoBlit,
@@ -253,6 +291,7 @@ class EmulatorWorkerApi {
                 speedGovernorTargetIPS
             );
         }
+        this.#supportsVMSnapshots = emulatorType === "Snow";
     }
 
     #abortError?: string;
@@ -302,6 +341,7 @@ class EmulatorWorkerApi {
     didOpenAudio(sampleRate: number, sampleSize: number, channels: number) {
         this.#audioSampleBytes = Math.max(1, sampleSize >> 3);
         this.#audioChannels = Math.max(1, channels);
+        this.#audio.setAudioFormat?.(sampleRate, sampleSize, channels);
         postMessage({
             type: "emulator_audio_open",
             sampleRate,
@@ -660,6 +700,55 @@ class EmulatorWorkerApi {
             saver.close();
         }
     }
+
+    requestVMSnapshotSave(requestId: number) {
+        this.#requestVMSnapshot("save", requestId);
+    }
+
+    requestVMSnapshotLoad(requestId: number, snapshot: Uint8Array) {
+        this.#requestVMSnapshot("load", requestId, snapshot);
+    }
+
+    #requestVMSnapshot(
+        action: "save" | "load",
+        requestId: number,
+        snapshot?: Uint8Array
+    ) {
+        if (!this.#supportsVMSnapshots) {
+            postMessage({
+                type: "emulator_vm_snapshot_error",
+                requestId,
+                error: "VM snapshots are only supported for Snow runtime.",
+            });
+            return;
+        }
+        const snapshotHooks = globalThis as SnapshotHookGlobal;
+        try {
+            if (action === "save") {
+                if (typeof snapshotHooks.__snowRequestVMSnapshotSave !== "function") {
+                    throw new Error("Snow snapshot save bridge is unavailable.");
+                }
+                snapshotHooks.__snowRequestVMSnapshotSave(requestId);
+                return;
+            }
+            if (typeof snapshotHooks.__snowRequestVMSnapshotLoad !== "function") {
+                throw new Error("Snow snapshot load bridge is unavailable.");
+            }
+            snapshotHooks.__snowRequestVMSnapshotLoad(
+                requestId,
+                snapshot ?? new Uint8Array(0)
+            );
+        } catch (err) {
+            postMessage({
+                type: "emulator_vm_snapshot_error",
+                requestId,
+                error:
+                    err instanceof Error
+                        ? err.message
+                        : "Failed to queue VM snapshot request.",
+            });
+        }
+    }
 }
 
 export class EmulatorFallbackEndpoint {
@@ -927,6 +1016,7 @@ async function startEmulator(config: EmulatorWorkerConfig) {
             moduleOverrides as EmscriptenModule;
         const workerApi = new EmulatorWorkerApi(config, emscriptenModule);
         moduleOverrides.workerApi = workerApi;
+        activeWorkerApi = workerApi;
         await workerApi.initDiskSavers();
         // Inject into global scope as `workerApi` so that the Emscripten
         // code can call into it.

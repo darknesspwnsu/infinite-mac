@@ -12,6 +12,7 @@ interface EmulatorAudioDataProvider {
 // from Basilisk II's audio_js.cpp, assuming 16-bit samples). This way we can
 // exert backpressure on the worker if the buffer starts to fill up.
 const READ_CHUNK_SIZE = 384 * 2 * 2;
+const MAX_FALLBACK_BUFFER_MS = 250;
 
 class SharedMemoryEmulatorAudioDataProvider
     implements EmulatorAudioDataProvider
@@ -37,18 +38,79 @@ class SharedMemoryEmulatorAudioDataProvider
 
 class FallbackEmulatorAudioDataProvider implements EmulatorAudioDataProvider {
     #datas: Uint8Array[] = [];
-    constructor(processor: AudioWorkletProcessor) {
+    #bufferedBytes = 0;
+    #droppedChunks = 0;
+    #lastStatsPostAt = -1;
+    #bytesPerMs: number;
+    #maxBufferedBytes: number;
+    #processor: AudioWorkletProcessor;
+
+    constructor(
+        processor: AudioWorkletProcessor,
+        options: {
+            sampleRate: number;
+            sampleSize: number;
+            channels: number;
+        }
+    ) {
+        this.#processor = processor;
+        const sampleBytes = Math.max(1, options.sampleSize >> 3);
+        const channels = Math.max(1, options.channels);
+        const bytesPerSecond = options.sampleRate * sampleBytes * channels;
+        this.#bytesPerMs = bytesPerSecond / 1000;
+        this.#maxBufferedBytes = Math.floor(this.#bytesPerMs * MAX_FALLBACK_BUFFER_MS);
         processor.port.onmessage = e => {
             if (e.data.type === "data") {
-                this.#datas.push(e.data.data);
+                const payload = e.data.data as Uint8Array;
+                this.#datas.push(payload);
+                this.#bufferedBytes += payload.byteLength;
+                while (
+                    this.#bufferedBytes > this.#maxBufferedBytes &&
+                    this.#datas.length > 1
+                ) {
+                    const dropped = this.#datas.shift();
+                    if (!dropped) {
+                        break;
+                    }
+                    this.#bufferedBytes = Math.max(
+                        0,
+                        this.#bufferedBytes - dropped.byteLength
+                    );
+                    this.#droppedChunks += 1;
+                }
+                this.#postStats(true);
             } else if (e.data.type === "reset") {
                 this.#datas = [];
+                this.#bufferedBytes = 0;
+                this.#droppedChunks = 0;
+                this.#postStats(true);
             }
         };
     }
 
+    #postStats(force = false) {
+        if (!force && currentTime - this.#lastStatsPostAt < 0.2) {
+            return;
+        }
+        this.#lastStatsPostAt = currentTime;
+        this.#processor.port.postMessage({
+            type: "queue-stats",
+            bufferedMs:
+                this.#bytesPerMs > 0 ? this.#bufferedBytes / this.#bytesPerMs : 0,
+            droppedChunks: this.#droppedChunks,
+        });
+    }
+
     audioData(): Uint8Array | undefined {
-        return this.#datas.shift();
+        const payload = this.#datas.shift();
+        if (payload) {
+            this.#bufferedBytes = Math.max(
+                0,
+                this.#bufferedBytes - payload.byteLength
+            );
+        }
+        this.#postStats();
+        return payload;
     }
 }
 
@@ -71,7 +133,14 @@ export class EmulatorPlaybackProcessor extends AudioWorkletProcessor {
             );
         } else {
             this.#audioDataProvider = new FallbackEmulatorAudioDataProvider(
-                this
+                this,
+                {
+                    sampleRate:
+                        options.processorOptions.sampleRate ??
+                        sampleRate,
+                    sampleSize: options.processorOptions.sampleSize,
+                    channels: options.processorOptions.channels ?? 2,
+                }
             );
         }
     }

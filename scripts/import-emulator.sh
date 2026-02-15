@@ -43,6 +43,10 @@ if [ ! -f "${EMULATOR_DIR}/${EMULATOR}.wasm" ]; then
     echo "${EMULATOR} has not been built. Refer to the README for details."
     exit
 fi
+if [ "$1" = "snow" ] && ! grep -q "js_snapshot_take_kind" "${EMULATOR_DIR}/${EMULATOR}${JS_EXTENSION}"; then
+    echo "Snow build is missing VM snapshot control symbols (js_snapshot_take_kind)." >&2
+    exit 1
+fi
 
 mkdir -p "${EMULATOR_DESTINATION_DIR}"
 # Build output

@@ -233,6 +233,8 @@ export type EmulatorWorkerFallbackAudioConfig = {type: "fallback"};
 
 export type EmulatorAudioProcessorOptions = {
     sampleSize: number;
+    sampleRate?: number;
+    channels?: number;
     debug: boolean;
     config: EmulatorWorkerAudioConfig;
 };

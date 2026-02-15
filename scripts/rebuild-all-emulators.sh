@@ -79,6 +79,10 @@ echo "✓ PearPC built successfully"
 echo "Building Snow"
 cd /snow
 cargo build -r -p snow_frontend_im --target wasm32-unknown-emscripten
+if ! grep -q "js_snapshot_take_kind" /snow/target/wasm32-unknown-emscripten/release/snow.js; then
+    echo "Snow build is missing VM snapshot control symbols (js_snapshot_take_kind)." >&2
+    exit 1
+fi
 echo "✓ Snow built successfully"
 
 echo "✓ All emulators built successfully!"
