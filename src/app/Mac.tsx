@@ -106,6 +106,9 @@ export default function Mac({
         useState(false);
     const [emulatorErrorText, setEmulatorErrorText] =
         useState(initialErrorText);
+    const [embedAudioState, setEmbedAudioState] = useState<
+        "booting" | "waiting" | "blocked" | "running"
+    >(isEmbed ? "booting" : "running");
     const [ethernetPeers, setEthernetPeers] = useState<
         readonly EmulatorEthernetPeer[]
     >([]);
@@ -272,6 +275,11 @@ export default function Mac({
                     if (listenForControlMessages) {
                         sendEmbedNotification({type: "emulator_loaded"});
                     }
+                    if (isEmbed) {
+                        setEmbedAudioState(state =>
+                            state === "running" ? "running" : "waiting"
+                        );
+                    }
                 },
                 emulatorDidMakeLoadingProgress(
                     emulator: Emulator,
@@ -362,6 +370,51 @@ export default function Mac({
                         });
                     }
                 },
+                emulatorAudioDidOpen(emulator, sampleRate, sampleSize, channels) {
+                    if (listenForControlMessages) {
+                        sendEmbedNotification({
+                            type: "emulator_audio_open",
+                            sampleRate,
+                            sampleSize,
+                            channels,
+                        });
+                    }
+                    if (isEmbed) {
+                        setEmbedAudioState(state =>
+                            state === "running" ? "running" : "waiting"
+                        );
+                    }
+                },
+                emulatorAudioDidRun() {
+                    if (listenForControlMessages) {
+                        sendEmbedNotification({
+                            type: "emulator_audio_running",
+                        });
+                    }
+                    if (isEmbed) {
+                        setEmbedAudioState("running");
+                    }
+                },
+                emulatorAudioDidBlock() {
+                    if (listenForControlMessages) {
+                        sendEmbedNotification({
+                            type: "emulator_audio_blocked",
+                        });
+                    }
+                    if (isEmbed) {
+                        setEmbedAudioState(state =>
+                            state === "running" ? "running" : "blocked"
+                        );
+                    }
+                },
+                emulatorAudioDidReportActivity(emulator, bytesPerSecond) {
+                    if (listenForControlMessages) {
+                        sendEmbedNotification({
+                            type: "emulator_audio_activity",
+                            bytesPerSecond,
+                        });
+                    }
+                },
             }
         );
         emulatorRef.current = emulator;
@@ -401,6 +454,9 @@ export default function Mac({
                         break;
                     case "emulator_unpause":
                         emulator.unpause();
+                        break;
+                    case "emulator_request_audio_resume":
+                        emulator.requestAudioResume();
                         break;
                     case "emulator_mouse_move": {
                         const {x, y, deltaX, deltaY} = event;
@@ -485,6 +541,7 @@ export default function Mac({
         handleMacLibraryProgress,
         screenUpdateMessages,
         listenForControlMessages,
+        isEmbed,
     ]);
 
     useEffect(() => {
@@ -651,6 +708,15 @@ export default function Mac({
                     ⓧ
                 </span>
                 Click the screen to lock the mouse for full control.
+            </div>
+        );
+    }
+    if (isEmbed && emulatorLoaded && embedAudioState !== "running") {
+        progress = (
+            <div className="Mac-Loading Mac-Loading-Non-Modal Mac-Loading-OneLine">
+                {embedAudioState === "blocked"
+                    ? "Click inside the emulator screen to enable sound."
+                    : "Preparing audio. Click inside the emulator if needed."}
             </div>
         );
     }

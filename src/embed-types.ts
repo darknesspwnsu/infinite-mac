@@ -7,6 +7,9 @@ export type EmbedControlEvent =
           type: "emulator_unpause";
       }
     | {
+          type: "emulator_request_audio_resume";
+      }
+    | {
           type: "emulator_mouse_move";
           /**
            * Some emulators (Mini vMac, Basilisk II, SheepShaver) support
@@ -50,6 +53,22 @@ export type EmbedControlEvent =
 export type EmbedNotificationEvent =
     | {
           type: "emulator_loaded";
+      }
+    | {
+          type: "emulator_audio_open";
+          sampleRate: number;
+          sampleSize: number;
+          channels: number;
+      }
+    | {
+          type: "emulator_audio_running";
+      }
+    | {
+          type: "emulator_audio_blocked";
+      }
+    | {
+          type: "emulator_audio_activity";
+          bytesPerSecond: number;
       }
     | {
           type: "emulator_screen";

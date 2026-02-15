@@ -8,14 +8,30 @@ import audioWorkletPath from "@/emulator/emulator-audio-worklet?worker&url";
 import {type EmulatorInput} from "@/emulator/ui/input";
 import {RingBuffer} from "ringbuf.js";
 
+export interface EmulatorAudioDelegate {
+    emulatorAudioDidOpen?(
+        sampleRate: number,
+        sampleSize: number,
+        channels: number
+    ): void;
+    emulatorAudioDidRun?(): void;
+    emulatorAudioDidBlock?(): void;
+    emulatorAudioDidReportActivity?(bytesPerSecond: number): void;
+}
+
 export abstract class EmulatorAudio {
     #input: EmulatorInput;
     #audioContext?: AudioContext;
+    #delegate?: EmulatorAudioDelegate;
     #debugInterval?: number;
+    #activityInterval?: number;
+    #activityBytes = 0;
+    #audioRunning = false;
     protected emulatorPlaybackNode?: AudioWorkletNode;
 
-    constructor(input: EmulatorInput) {
+    constructor(input: EmulatorInput, delegate?: EmulatorAudioDelegate) {
         this.#input = input;
+        this.#delegate = delegate;
     }
 
     async init(
@@ -37,6 +53,7 @@ export abstract class EmulatorAudio {
         console.log(
             `${verb} audio (sampleRate=${sampleRate}, sampleSize=${sampleSize}, channels=${channels})`
         );
+        this.#delegate?.emulatorAudioDidOpen?.(sampleRate, sampleSize, channels);
         this.#audioContext = new AudioContext({
             latencyHint: "interactive",
             sampleRate,
@@ -69,6 +86,7 @@ export abstract class EmulatorAudio {
         // We can't start the audio context until there's a user gesture.
         if (this.#audioContext.state === "suspended") {
             window.addEventListener("pointerdown", this.#resumeOnGesture);
+            this.#delegate?.emulatorAudioDidBlock?.();
             this.#audioContext?.addEventListener(
                 "statechange",
                 () => {
@@ -82,11 +100,13 @@ export abstract class EmulatorAudio {
                         // so that the buffer doesn't get too full.
                         window.setTimeout(
                             () => this.#handleAudioContextRunning(),
-                            250
-                        );
+                                250
+                            );
+                    } else if (this.#audioContext?.state === "suspended") {
+                        this.#delegate?.emulatorAudioDidBlock?.();
                     }
                 },
-                {once: true}
+                {once: false}
             );
             this.#resumeOnGesture(); // Try resuming anyway, in case we get lucky.
         } else {
@@ -106,16 +126,44 @@ export abstract class EmulatorAudio {
     };
 
     #handleAudioContextRunning() {
+        if (this.#audioRunning) {
+            return;
+        }
+        this.#audioRunning = true;
         this.resetAudioBuffer();
         this.#input.handleInput({type: "audio-context-running"});
+        this.#delegate?.emulatorAudioDidRun?.();
+        if (this.#delegate?.emulatorAudioDidReportActivity) {
+            this.#activityInterval = window.setInterval(() => {
+                const bytesPerSecond = this.#activityBytes;
+                this.#activityBytes = 0;
+                this.#delegate?.emulatorAudioDidReportActivity?.(bytesPerSecond);
+            }, 1000);
+        }
+    }
+
+    requestResume() {
+        this.#resumeOnGesture();
+    }
+
+    protected reportActivity(byteCount: number) {
+        if (byteCount <= 0) {
+            return;
+        }
+        this.#activityBytes += byteCount;
     }
 
     stop() {
         this.#audioContext?.close();
         window.removeEventListener("pointerdown", this.#resumeOnGesture);
+        if (this.#activityInterval) {
+            window.clearInterval(this.#activityInterval);
+        }
         if (this.#debugInterval) {
             window.clearInterval(this.#debugInterval);
         }
+        this.#audioRunning = false;
+        this.#activityBytes = 0;
     }
 
     #debugLog(sampleRate: number, sampleSize: number, channels: number) {
@@ -175,6 +223,7 @@ export class FallbackEmulatorAudio extends EmulatorAudio {
 
     handleData(data: Uint8Array) {
         this.emulatorPlaybackNode?.port.postMessage({type: "data", data});
+        this.reportActivity(data.byteLength);
     }
 
     protected resetAudioBuffer() {

@@ -140,6 +140,18 @@ export interface EmulatorDelegate {
         progress: number
     ): void;
     emulatorDidDrawScreen?(emulator: Emulator, data: ImageData): void;
+    emulatorAudioDidOpen?(
+        emulator: Emulator,
+        sampleRate: number,
+        sampleSize: number,
+        channels: number
+    ): void;
+    emulatorAudioDidRun?(emulator: Emulator): void;
+    emulatorAudioDidBlock?(emulator: Emulator): void;
+    emulatorAudioDidReportActivity?(
+        emulator: Emulator,
+        bytesPerSecond: number
+    ): void;
 }
 
 export type EmulatorFallbackCommandSender = (
@@ -232,9 +244,31 @@ export class Emulator {
         this.#input = useSharedMemory
             ? new SharedMemoryEmulatorInput(config)
             : new FallbackEmulatorInput(config, fallbackCommandSender!);
+        const audioDelegate = {
+            emulatorAudioDidOpen: (
+                sampleRate: number,
+                sampleSize: number,
+                channels: number
+            ) =>
+                this.#delegate?.emulatorAudioDidOpen?.(
+                    this,
+                    sampleRate,
+                    sampleSize,
+                    channels
+                ),
+            emulatorAudioDidRun: () =>
+                this.#delegate?.emulatorAudioDidRun?.(this),
+            emulatorAudioDidBlock: () =>
+                this.#delegate?.emulatorAudioDidBlock?.(this),
+            emulatorAudioDidReportActivity: (bytesPerSecond: number) =>
+                this.#delegate?.emulatorAudioDidReportActivity?.(
+                    this,
+                    bytesPerSecond
+                ),
+        };
         this.#audio = useSharedMemory
-            ? new SharedMemoryEmulatorAudio(this.#input)
-            : new FallbackEmulatorAudio(this.#input);
+            ? new SharedMemoryEmulatorAudio(this.#input, audioDelegate)
+            : new FallbackEmulatorAudio(this.#input, audioDelegate);
         this.#files = useSharedMemory
             ? new SharedMemoryEmulatorFiles()
             : new FallbackEmulatorFiles(fallbackCommandSender!);
@@ -601,6 +635,10 @@ export class Emulator {
 
     unpause() {
         this.#input.handleInput({type: "unpause"});
+    }
+
+    requestAudioResume() {
+        this.#audio.requestResume();
     }
 
     handleExternalInput(
