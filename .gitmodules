@@ -22,4 +22,5 @@
 	url = https://github.com/mihaip/pearpc
 [submodule "snow"]
 	path = snow
-	url = https://github.com/mihaip/snow.git
+	url = https://github.com/darknesspwnsu/snow.git
+	branch = master
