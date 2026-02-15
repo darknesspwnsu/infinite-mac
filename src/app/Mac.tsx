@@ -40,6 +40,13 @@ import {
     saveDiskSaverImage,
 } from "@/emulator/ui/disk-saver";
 import {
+    deleteStateSlot,
+    getSaveStateCapabilities,
+    loadStateSlot,
+    querySaveStateSlots,
+    saveStateSlot,
+} from "@/emulator/ui/save-slots";
+import {
     emulatorNeedsMouseDeltas,
     emulatorNeedsTheOutsideWorldDisk,
     emulatorSupportsCDROMs,
@@ -231,6 +238,83 @@ export default function Mac({
         const sendEmbedNotification = (event: EmbedNotificationEvent) => {
             window.parent.postMessage(event, "*");
         };
+        const refreshEmbedSaveStateStatus = async () => {
+            if (!listenForControlMessages) {
+                return;
+            }
+
+            const capabilities = await getSaveStateCapabilities();
+            sendEmbedNotification({
+                type: "emulator_state_capabilities",
+                supported: capabilities.supported,
+                reason: capabilities.reason,
+                slotCount: capabilities.slotCount,
+            });
+
+            if (!capabilities.supported) {
+                sendEmbedNotification({
+                    type: "emulator_state_slots",
+                    slots: [
+                        {slotIndex: 1, exists: false},
+                        {slotIndex: 2, exists: false},
+                        {slotIndex: 3, exists: false},
+                    ],
+                });
+                return;
+            }
+
+            const slots = await querySaveStateSlots();
+            sendEmbedNotification({
+                type: "emulator_state_slots",
+                slots,
+            });
+        };
+        const runEmbedSaveStateAction = async (
+            action: "save" | "load" | "delete",
+            slotIndex: 1 | 2 | 3
+        ) => {
+            try {
+                if (action === "save") {
+                    emulator.pause();
+                    await saveStateSlot(slotIndex);
+                    emulator.unpause();
+                } else if (action === "load") {
+                    emulator.pause();
+                    await loadStateSlot(slotIndex);
+                } else {
+                    emulator.pause();
+                    await deleteStateSlot(slotIndex);
+                    emulator.unpause();
+                }
+
+                sendEmbedNotification({
+                    type: "emulator_state_action_result",
+                    action,
+                    slotIndex,
+                    ok: true,
+                });
+                await refreshEmbedSaveStateStatus();
+
+                if (action === "load") {
+                    // Loading a checkpoint rewrites OPFS disk state, so reboot
+                    // to remount state from a clean emulator process.
+                    window.setTimeout(() => window.location.reload(), 120);
+                }
+            } catch (err) {
+                sendEmbedNotification({
+                    type: "emulator_state_action_result",
+                    action,
+                    slotIndex,
+                    ok: false,
+                    message:
+                        err instanceof Error
+                            ? err.message
+                            : "Save-state action failed.",
+                });
+                await refreshEmbedSaveStateStatus();
+                emulator.unpause();
+            }
+        };
 
         const emulator = new Emulator(
             {
@@ -274,6 +358,7 @@ export default function Mac({
                     }
                     if (listenForControlMessages) {
                         sendEmbedNotification({type: "emulator_loaded"});
+                        void refreshEmbedSaveStateStatus();
                     }
                     if (isEmbed) {
                         setEmbedAudioState(state =>
@@ -517,6 +602,18 @@ export default function Mac({
                                     err
                                 )
                             );
+                        break;
+                    case "emulator_state_slots_query":
+                        void refreshEmbedSaveStateStatus();
+                        break;
+                    case "emulator_state_slot_save":
+                        void runEmbedSaveStateAction("save", event.slotIndex);
+                        break;
+                    case "emulator_state_slot_load":
+                        void runEmbedSaveStateAction("load", event.slotIndex);
+                        break;
+                    case "emulator_state_slot_delete":
+                        void runEmbedSaveStateAction("delete", event.slotIndex);
                         break;
                     default:
                         console.warn("Unknown message from parent:", e.data);
