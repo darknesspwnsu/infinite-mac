@@ -6,7 +6,8 @@ type CDROMSpec = {
     totalSize?: number;
 };
 
-const CDROM_CHUNK_TIMEOUT_MS = 10_000;
+const CDROM_CHUNK_TIMEOUT_MS = 15_000;
+const CDROM_PROBE_TIMEOUT_MS = 10_000;
 
 export async function handleRequest(path: string, method: string) {
     const pathPieces = path.split("/");
@@ -128,28 +129,11 @@ async function handleGET(pathPieces: string[], spec: CDROMSpec) {
  * get_output_manifest from import-cd-roms.py does.
  */
 async function handlePUT(srcUrl: string) {
-    const response = await fetch(srcUrl, {
-        method: "HEAD",
-        headers: {
-            "User-Agent": "Infinite Mac (+https://infinitemac.org)",
-        },
-    });
-    if (!response.ok) {
-        return errorResponse(
-            `CD-ROM HEAD request failed: ${response.status} (${response.statusText})`
-        );
+    const fileSizeResult = await probeCDROMFileSize(srcUrl);
+    if (!fileSizeResult.ok) {
+        return errorResponse(fileSizeResult.error);
     }
-    const contentLength = response.headers.get("Content-Length");
-    if (!contentLength) {
-        return errorResponse(`CD-ROM HEAD request failed: no Content-Length`);
-    }
-
-    const fileSize = parseInt(contentLength);
-    if (isNaN(fileSize)) {
-        return errorResponse(
-            `CD-ROM HEAD request failed: invalid Content-Length (${contentLength})`
-        );
-    }
+    const fileSize = fileSizeResult.fileSize;
 
     // It would be nice to also check that the Accept-Ranges header contains
     // `bytes`, but it seems to be stripped from the response when running in
@@ -178,6 +162,103 @@ async function handlePUT(srcUrl: string) {
             "Content-Type": "application/json",
         },
     });
+}
+
+type ProbeResult =
+    | {
+          ok: true;
+          fileSize: number;
+      }
+    | {
+          ok: false;
+          error: string;
+      };
+
+function parsePositiveInt(value: string | null): number | null {
+    if (!value) {
+        return null;
+    }
+    const parsed = parseInt(value, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        return null;
+    }
+    return parsed;
+}
+
+function parseSizeFromContentRange(value: string | null): number | null {
+    if (!value) {
+        return null;
+    }
+    const match = /bytes\s+\d+-\d+\/(\d+)/i.exec(value);
+    if (!match?.[1]) {
+        return null;
+    }
+    return parsePositiveInt(match[1]);
+}
+
+async function probeCDROMFileSize(srcUrl: string): Promise<ProbeResult> {
+    const headers = {
+        "User-Agent": "Infinite Mac (+https://infinitemac.org)",
+    };
+
+    try {
+        const headResponse = await fetch(srcUrl, {
+            method: "HEAD",
+            headers,
+            signal: AbortSignal.timeout(CDROM_PROBE_TIMEOUT_MS),
+        });
+        if (headResponse.ok) {
+            const fileSize = parsePositiveInt(
+                headResponse.headers.get("Content-Length")
+            );
+            if (fileSize !== null) {
+                return {ok: true, fileSize};
+            }
+        }
+    } catch {
+        // Fall through to ranged GET probe.
+    }
+
+    try {
+        const rangeResponse = await fetch(srcUrl, {
+            method: "GET",
+            headers: {
+                ...headers,
+                Range: "bytes=0-0",
+            },
+            signal: AbortSignal.timeout(CDROM_PROBE_TIMEOUT_MS),
+        });
+        if (!rangeResponse.ok) {
+            return {
+                ok: false,
+                error: `CD-ROM probe request failed: ${rangeResponse.status} (${rangeResponse.statusText})`,
+            };
+        }
+        const rangedSize = parseSizeFromContentRange(
+            rangeResponse.headers.get("Content-Range")
+        );
+        if (rangedSize !== null) {
+            return {ok: true, fileSize: rangedSize};
+        }
+        const fullSize = parsePositiveInt(
+            rangeResponse.headers.get("Content-Length")
+        );
+        if (fullSize !== null) {
+            return {ok: true, fileSize: fullSize};
+        }
+        return {
+            ok: false,
+            error: "CD-ROM probe request failed: missing size headers",
+        };
+    } catch (error) {
+        return {
+            ok: false,
+            error:
+                error instanceof Error
+                    ? `CD-ROM probe request failed: ${error.message}`
+                    : "CD-ROM probe request failed",
+        };
+    }
 }
 
 async function fetchChunk(
